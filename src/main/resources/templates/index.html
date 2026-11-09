@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Chat With Your Docs</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: Arial, sans-serif; background: #f4f6fb; color: #172033; }
+        header { background: #172554; color: white; padding: 22px 6%; }
+        header h1 { margin: 0 0 6px; font-size: 25px; }
+        header p { margin: 0; color: #cbd5e1; }
+        main { max-width: 1050px; margin: 28px auto; padding: 0 18px; display: grid; grid-template-columns: 300px 1fr; gap: 20px; }
+        .panel { background: white; border-radius: 14px; padding: 22px; box-shadow: 0 5px 20px #0f172a0d; }
+        h2 { margin-top: 0; font-size: 18px; }
+        button { border: 0; background: #2563eb; color: white; padding: 11px 15px; border-radius: 8px; cursor: pointer; font-weight: 600; }
+        button.secondary { background: #e2e8f0; color: #172033; }
+        input[type=file] { width: 100%; margin: 14px 0; }
+        #status, #notice { color: #475569; font-size: 13px; line-height: 1.5; margin-top: 12px; }
+        #activity { margin-top: 20px; }
+        #activity h3 { margin: 0 0 8px; font-size: 15px; }
+        #activityLog { max-height: 190px; overflow-y: auto; margin: 0; padding: 10px 10px 10px 28px; border: 1px solid #e2e8f0; border-radius: 8px; color: #475569; font-size: 12px; }
+        #activityLog li { padding: 4px 0; overflow-wrap: anywhere; }
+        #activityLog time { color: #94a3b8; margin-right: 7px; }
+        #activityLog .success { color: #15803d; }
+        #activityLog .error { color: #b91c1c; }
+        #chat { min-height: 390px; max-height: 55vh; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+        .bubble { padding: 12px 14px; border-radius: 10px; margin: 10px 0; white-space: pre-wrap; line-height: 1.5; }
+        .user { background: #dbeafe; margin-left: 12%; }
+        .assistant { background: #f1f5f9; margin-right: 8%; }
+        .sources { font-size: 12px; color: #64748b; margin-top: 7px; }
+        .ask { display: flex; gap: 8px; }
+        .ask input { flex: 1; min-width: 0; padding: 12px; border: 1px solid #cbd5e1; border-radius: 8px; }
+        @media(max-width: 720px) { main { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+<header>
+    <h1>📚 Chat With Your Docs</h1>
+    <p>Upload documents and ask questions. Answers are grounded in your content.</p>
+</header>
+<main>
+    <aside class="panel">
+        <h2>1. Upload documents</h2>
+        <input id="file" type="file" accept=".pdf,.txt">
+        <button onclick="uploadFile()">Upload & Process</button>
+        <button class="secondary" onclick="clearDocs()">Clear</button>
+        <div id="status">No documents indexed yet.</div>
+        <div id="notice">Supported: text-based PDF and TXT. Scanned PDFs need OCR.</div>
+        <section id="activity" aria-labelledby="activityHeading">
+            <h3 id="activityHeading">Activity</h3>
+            <ol id="activityLog" aria-live="polite">
+                <li id="activityEmpty">No activity yet.</li>
+            </ol>
+        </section>
+    </aside>
+    <section class="panel">
+        <h2>2. Ask your documents</h2>
+        <div id="chat">
+            <div class="bubble assistant">Hello! Upload a document, then ask me a question about its content.</div>
+        </div>
+        <form class="ask" onsubmit="askQuestion(event)">
+            <input id="question" placeholder="Ask a question about your documents..." required>
+            <button type="submit">Ask</button>
+        </form>
+    </section>
+</main>
+<script>
+    const chat = document.getElementById('chat');
+    const activityLog = document.getElementById('activityLog');
+    function logActivity(message, level = 'info') {
+        const empty = document.getElementById('activityEmpty');
+        if (empty) empty.remove();
+
+        const entry = document.createElement('li');
+        entry.className = level;
+        const time = document.createElement('time');
+        const now = new Date();
+        time.dateTime = now.toISOString();
+        time.textContent = now.toLocaleTimeString();
+        const detail = document.createElement('span');
+        detail.textContent = message;
+        entry.append(time, detail);
+        activityLog.appendChild(entry);
+
+        while (activityLog.children.length > 30) {
+            activityLog.firstElementChild.remove();
+        }
+        activityLog.scrollTop = activityLog.scrollHeight;
+    }
+    function addBubble(text, type, sources) {
+        const div = document.createElement('div');
+        div.className = 'bubble ' + type;
+        div.textContent = text;
+        if (sources && sources.length) {
+            const source = document.createElement('div');
+            source.className = 'sources';
+            source.textContent = 'Sources: ' + sources.join(', ');
+            div.appendChild(source);
+        }
+        chat.appendChild(div);
+        chat.scrollTop = chat.scrollHeight;
+        return div;
+    }
+    async function responseError(response) {
+        const body = await response.text();
+        if (body) {
+            try {
+                const payload = JSON.parse(body);
+                const message = payload.message || payload.detail || payload.error?.message || payload.error;
+                if (typeof message === 'string') return message;
+                if (message) return JSON.stringify(message);
+            } catch {
+                const plainText = body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+                if (plainText) return plainText;
+            }
+        }
+        return `Request failed (${response.status} ${response.statusText})`;
+    }
+    async function refreshStatus() {
+        const response = await fetch('/api/status');
+        if (!response.ok) throw new Error(await responseError(response));
+        const data = await response.json();
+        document.getElementById('status').textContent = 'Indexed chunks: ' + data.indexedChunks;
+    }
+    async function uploadFile() {
+        const file = document.getElementById('file').files[0];
+        if (!file) { alert('Choose a PDF or TXT file first.'); return; }
+        const form = new FormData();
+        form.append('file', file);
+        document.getElementById('status').textContent = 'Processing document...';
+        logActivity(`Upload started: ${file.name}`);
+        try {
+            const response = await fetch('/api/documents', { method: 'POST', body: form });
+            if (!response.ok) throw new Error(await responseError(response));
+            const message = await response.text();
+            document.getElementById('status').textContent = message;
+            logActivity(`${file.name}: ${message}`, 'success');
+            await refreshStatus();
+        } catch (error) {
+            document.getElementById('status').textContent = 'Error: ' + error.message;
+            logActivity(`Upload failed: ${error.message}`, 'error');
+        }
+    }
+    async function askQuestion(event) {
+        event.preventDefault();
+        const input = document.getElementById('question');
+        const question = input.value.trim();
+        if (!question) return;
+        addBubble(question, 'user');
+        input.value = '';
+        const pending = addBubble('Searching your documents and generating an answer...', 'assistant');
+        logActivity('Question submitted; searching documents and generating an answer.');
+        try {
+            const response = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ question })
+            });
+            if (!response.ok) throw new Error(await responseError(response));
+            const data = await response.json();
+            pending.remove();
+            addBubble(data.answer, 'assistant', data.sources);
+            logActivity(`Answer received from ${data.sources.length} source file(s).`, 'success');
+        } catch (error) {
+            pending.remove();
+            addBubble('Error: ' + error.message, 'assistant');
+            logActivity(`Question failed: ${error.message}`, 'error');
+        }
+    }
+    async function clearDocs() {
+        logActivity('Clearing indexed documents.');
+        try {
+            const response = await fetch('/api/documents', { method: 'DELETE' });
+            if (!response.ok) throw new Error(await responseError(response));
+            document.getElementById('status').textContent = await response.text();
+            chat.innerHTML = '';
+            await refreshStatus();
+            logActivity('Indexed documents cleared.', 'success');
+        } catch (error) {
+            logActivity(`Could not clear documents: ${error.message}`, 'error');
+        }
+    }
+    refreshStatus().catch(error => logActivity(`Could not load status: ${error.message}`, 'error'));
+</script>
+</body>
+</html>
